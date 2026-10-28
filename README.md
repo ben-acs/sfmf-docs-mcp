@@ -6,11 +6,11 @@ This repository maintains a local Markdown copy of Salesforce's published docume
 
 ## Documentation
 
-The documentation index is available at:
+Start with [`docs/llms-multi-framework.md`](docs/llms-multi-framework.md).
 
-[`docs/llms-multi-framework.md`](docs/llms-multi-framework.md)
+This index links to locally synchronised Markdown pages in `docs/pages/`. The directory structure preserves the upstream Salesforce documentation paths to avoid filename collisions.
 
-The index identifies Salesforce Multi-Framework documentation resources that can be used to answer implementation, configuration, development, and troubleshooting questions.
+Links between downloaded pages are rewritten to local paths. Links to resources outside the downloaded set remain unchanged.
 
 ## Official Source
 
@@ -18,18 +18,19 @@ The source document is published by Salesforce:
 
 https://developer.salesforce.com/docs/llms-multi-framework.txt
 
-The local Markdown file is generated directly from this source. It is intended to preserve the original content rather than replace or reinterpret Salesforce's documentation.
+> The local index and documentation pages are generated from official Salesforce sources. Links to downloaded pages are rewritten to local paths; Salesforce remains the authoritative source.
 
 ## Synchronisation
 
-GitHub Actions maintains the local documentation copy.
+GitHub Actions synchronises the documentation:
+- Weekly, on Monday at 06:00 UTC.
+- On demand through the workflow's **Run workflow** action.
 
-The workflow runs:
-- When changes are pushed to the `main` branch.
-- On a daily schedule.
-- When manually triggered through GitHub Actions.
+Each run dynamically discovers Salesforce Markdown URLs listed in the official index and downloads those pages. It does not recursively crawl links found within individual pages.
 
-When the retrieved source differs from the committed version, the workflow creates a commit containing the updated documentation.
+All downloads must succeed before tracked documentation is updated. The workflow commits changes only when the generated content differs.
+
+The `docs/pages/` directory is generated and must not be edited manually. Pages no longer listed in the upstream index are removed during the next successful sync.
 
 ## Implementation
 
@@ -69,7 +70,11 @@ sfmf-docs-mcp/
 │   └── workflows/
 │       └── sync-docs.yml
 ├── docs/
-│   └── llms-multi-framework.md
+│   ├── llms-multi-framework.md
+│   └── pages/
+│       └── docs/
+│           └── platform/
+│               └── ...
 ├── llms.txt
 └── README.md
 ```

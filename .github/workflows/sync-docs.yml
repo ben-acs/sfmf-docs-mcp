@@ -1,14 +1,9 @@
-
 name: Sync Salesforce Documentation
 
 on:
-  push:
-    branches:
-      - main
-
   schedule:
-    # Run daily at 06:00 UTC
-    - cron: "0 6 * * *"
+    # Run weekly on Monday at 06:00 UTC
+    - cron: "0 6 * * 1"
 
   workflow_dispatch:
 
@@ -16,9 +11,13 @@ concurrency:
   group: sync-salesforce-docs
   cancel-in-progress: false
 
+permissions:
+  contents: read
+
 jobs:
   sync:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     permissions:
       contents: write
@@ -29,42 +28,154 @@ jobs:
         with:
           persist-credentials: true
 
-      - name: Fetch Salesforce documentation
+      - name: Fetch index and linked documentation
         shell: bash
         run: |
           set -euo pipefail
 
-          mkdir -p docs
+          python3 <<'PY'
+          import os
+          import re
+          import subprocess
+          import tempfile
+          from concurrent.futures import ThreadPoolExecutor
+          from pathlib import Path
+          from urllib.parse import urldefrag, urljoin, urlsplit
 
-          curl \
-            --fail \
-            --silent \
-            --show-error \
-            --location \
-            --retry 3 \
-            --max-time 60 \
-            https://developer.salesforce.com/docs/llms-multi-framework.txt \
-            --output /tmp/llms-multi-framework.txt
+          INDEX_URL = (
+              "https://developer.salesforce.com/docs/"
+              "llms-multi-framework.txt"
+          )
+          INDEX_PATH = Path("docs/llms-multi-framework.md")
+          PAGES_DIR = Path("docs/pages")
+          LINK_PATTERN = re.compile(r"\]\(([^)\s]+)\)")
 
-          test -s /tmp/llms-multi-framework.txt
+          def fetch(url, destination):
+              destination.parent.mkdir(parents=True, exist_ok=True)
+              subprocess.run(
+                  [
+                      "curl",
+                      "--fail",
+                      "--silent",
+                      "--show-error",
+                      "--location",
+                      "--retry", "3",
+                      "--connect-timeout", "15",
+                      "--max-time", "60",
+                      "--proto", "=https",
+                      "--proto-redir", "=https",
+                      "--output", str(destination),
+                      url,
+                  ],
+                  check=True,
+              )
+              content = destination.read_text(encoding="utf-8")
+              beginning = content.lstrip().lower()
+              if not content.strip() or beginning.startswith(
+                  ("<!doctype html", "<html")
+              ):
+                  raise ValueError(f"Expected Markdown content from {url}")
+              return content
 
-          if ! grep -qiE 'salesforce|multi-framework' \
-            /tmp/llms-multi-framework.txt; then
-            echo "Downloaded content failed validation."
-            exit 1
-          fi
+          def is_documentation_url(url):
+              parsed = urlsplit(url)
+              return (
+                  parsed.scheme == "https"
+                  and parsed.netloc == "developer.salesforce.com"
+                  and parsed.path.startswith("/docs/")
+                  and parsed.path.endswith(".md")
+                  and not parsed.query
+              )
 
-          cp /tmp/llms-multi-framework.txt \
-            docs/llms-multi-framework.md
+          def local_page_path(url):
+              # Preserve upstream directories to avoid filename collisions.
+              parts = urlsplit(url).path.lstrip("/").split("/")
+              if any(part in ("", ".", "..") for part in parts):
+                  raise ValueError(f"Unsafe documentation path: {url}")
+              return PAGES_DIR.joinpath(*parts)
 
-          echo "Fetched $(wc -c < docs/llms-multi-framework.md) bytes"
+          def rewrite_links(content, source_url, destination, local_paths):
+              def replace(match):
+                  absolute_url, fragment = urldefrag(
+                      urljoin(source_url, match.group(1))
+                  )
+                  target = local_paths.get(absolute_url)
+                  if target is None:
+                      return match.group(0)
+                  relative = Path(
+                      os.path.relpath(target, destination.parent)
+                  ).as_posix()
+                  suffix = f"#{fragment}" if fragment else ""
+                  return f"]({relative}{suffix})"
+
+              return LINK_PATTERN.sub(replace, content)
+
+          with tempfile.TemporaryDirectory() as temporary_directory:
+              staging = Path(temporary_directory)
+              index = fetch(INDEX_URL, staging / "index.md")
+
+              urls = sorted({
+                  absolute_url
+                  for match in LINK_PATTERN.finditer(index)
+                  if is_documentation_url(
+                      absolute_url := urldefrag(
+                          urljoin(INDEX_URL, match.group(1))
+                      )[0]
+                  )
+              })
+
+              if not urls:
+                  raise ValueError(
+                      "No Salesforce Markdown links found in the index"
+                  )
+
+              local_paths = {
+                  url: local_page_path(url)
+                  for url in urls
+              }
+
+              def download(url):
+                  content = fetch(url, staging / local_paths[url])
+                  return url, content
+
+              with ThreadPoolExecutor(max_workers=4) as executor:
+                  pages = dict(executor.map(download, urls))
+
+              # Do not change tracked files until every download succeeds.
+              INDEX_PATH.parent.mkdir(parents=True, exist_ok=True)
+              INDEX_PATH.write_text(
+                  rewrite_links(
+                      index, INDEX_URL, INDEX_PATH, local_paths
+                  ),
+                  encoding="utf-8",
+              )
+
+              for url, content in pages.items():
+                  destination = local_paths[url]
+                  destination.parent.mkdir(parents=True, exist_ok=True)
+                  destination.write_text(
+                      rewrite_links(
+                          content, url, destination, local_paths
+                      ),
+                      encoding="utf-8",
+                  )
+
+              # Remove obsolete generated pages, not other documentation.
+              expected_paths = set(local_paths.values())
+              for existing in PAGES_DIR.rglob("*.md"):
+                  if existing not in expected_paths:
+                      existing.unlink()
+                      print(f"Removed obsolete page: {existing}")
+
+              print(f"Synced index and {len(pages)} documentation pages")
+          PY
 
       - name: Commit changes
         shell: bash
         run: |
           set -euo pipefail
 
-          git add docs/llms-multi-framework.md
+          git add -- docs/llms-multi-framework.md docs/pages/
 
           if git diff --cached --quiet; then
             echo "Documentation unchanged."
