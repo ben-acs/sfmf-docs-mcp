@@ -1,0 +1,79 @@
+
+name: Sync Salesforce Documentation
+
+on:
+  push:
+    branches:
+      - main
+
+  schedule:
+    # Run daily at 06:00 UTC
+    - cron: "0 6 * * *"
+
+  workflow_dispatch:
+
+concurrency:
+  group: sync-salesforce-docs
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+
+      - name: Fetch Salesforce documentation
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p docs
+
+          curl \
+            --fail \
+            --silent \
+            --show-error \
+            --location \
+            --retry 3 \
+            --max-time 60 \
+            https://developer.salesforce.com/docs/llms-multi-framework.txt \
+            --output /tmp/llms-multi-framework.txt
+
+          test -s /tmp/llms-multi-framework.txt
+
+          if ! grep -qiE 'salesforce|multi-framework' \
+            /tmp/llms-multi-framework.txt; then
+            echo "Downloaded content failed validation."
+            exit 1
+          fi
+
+          cp /tmp/llms-multi-framework.txt \
+            docs/llms-multi-framework.md
+
+          echo "Fetched $(wc -c < docs/llms-multi-framework.md) bytes"
+
+      - name: Commit changes
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git add docs/llms-multi-framework.md
+
+          if git diff --cached --quiet; then
+            echo "Documentation unchanged."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git commit -m "chore(docs): sync Salesforce documentation"
+          git push
